@@ -55,9 +55,6 @@ impl Database {
         // 创建表结构
         self.create_tables(&conn)?;
 
-        // 迁移旧表
-        self.migrate_credentials_table(&conn)?;
-
         // 初始化默认数据（admin 账号 + 系统设置）
         self.init_default_data(&conn, &init_config)?;
 
@@ -154,20 +151,6 @@ impl Database {
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
                 params![key, value],
             )?;
-        }
-
-        Ok(())
-    }
-
-    /// 迁移凭据表（添加新字段）
-    fn migrate_credentials_table(&self, conn: &Connection) -> anyhow::Result<()> {
-        // 检查并添加 proxy_url 字段
-        let has_proxy_url: bool = conn
-            .prepare("SELECT proxy_url FROM credentials LIMIT 1")
-            .is_ok();
-        if !has_proxy_url {
-            conn.execute("ALTER TABLE credentials ADD COLUMN proxy_url TEXT", [])?;
-            tracing::info!("数据库迁移：添加 proxy_url 字段");
         }
 
         Ok(())
