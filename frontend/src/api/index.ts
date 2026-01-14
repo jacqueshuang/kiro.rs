@@ -207,3 +207,60 @@ export const settingsApi = {
       body: JSON.stringify(data),
     }),
 };
+
+// 导入导出相关
+export interface ExportCredentialItem {
+  refreshToken: string;
+  clientId?: string;
+  clientSecret?: string;
+  region?: string;
+  proxyUrl?: string;
+}
+
+export interface ExportCredentialsRequest {
+  ids?: number[];
+}
+
+export interface ExportCredentialsResponse {
+  success: boolean;
+  message: string;
+  count: number;
+  credentials: ExportCredentialItem[];
+}
+
+export interface ImportCredentialItem {
+  refreshToken: string;
+  clientId?: string;
+  clientSecret?: string;
+  region?: string;
+  proxyUrl?: string;
+}
+
+export interface ImportCredentialsResponse {
+  success: boolean;
+  message: string;
+  successCount: number;
+  failures: { index: number; error: string }[];
+}
+
+export const importExportApi = {
+  // 导出凭据
+  export: (data: ExportCredentialsRequest) =>
+    request<ExportCredentialsResponse>('/credentials/export', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  // 批量导入凭据
+  import: (data: ImportCredentialItem | ImportCredentialItem[]) =>
+    request<ImportCredentialsResponse>('/credentials/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  // 使用此账号
+  useCurrent: (id: number) =>
+    request<{ success: boolean; message: string }>(`/credentials/${id}/use`, {
+      method: 'POST',
+    }),
+};

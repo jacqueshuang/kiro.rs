@@ -8,7 +8,9 @@ use crate::kiro::token_manager::MultiTokenManager;
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
-    CredentialsStatusResponse, RefreshAllResponse, RefreshFailure, UpdateCredentialRequest,
+    CredentialsStatusResponse, ExportCredentialItem, ExportCredentialsRequest,
+    ExportCredentialsResponse, ImportCredentialItem, ImportCredentialsResponse, ImportFailure,
+    RefreshAllResponse, RefreshFailure, UpdateCredentialRequest,
 };
 
 /// Admin 服务
@@ -280,6 +282,106 @@ impl AdminService {
                 .into_iter()
                 .map(|(id, error)| RefreshFailure { id, error })
                 .collect(),
+        }
+    }
+
+    /// 设置当前使用的凭据
+    pub fn set_current(&self, id: u64) -> Result<(), AdminServiceError> {
+        self.token_manager
+            .set_current(id)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 导出凭据
+    pub fn export_credentials(&self, req: ExportCredentialsRequest) -> ExportCredentialsResponse {
+        let all_creds = self.token_manager.get_all_credentials_for_export();
+
+        let credentials: Vec<ExportCredentialItem> = all_creds
+            .into_iter()
+            .filter(|cred| {
+                // 如果指定了 ID 列表，则只导出指定的凭据
+                if let Some(ref ids) = req.ids {
+                    cred.id.map_or(false, |id| ids.contains(&id))
+                } else {
+                    true
+                }
+            })
+            .filter_map(|cred| {
+                // 必须有 refresh_token 才能导出
+                cred.refresh_token.map(|refresh_token| ExportCredentialItem {
+                    refresh_token,
+                    client_id: cred.client_id.filter(|s| !s.is_empty()),
+                    client_secret: cred.client_secret.filter(|s| !s.is_empty()),
+                    region: cred.region,
+                    proxy_url: cred.proxy_url.filter(|s| !s.is_empty()),
+                })
+            })
+            .collect();
+
+        let count = credentials.len();
+        ExportCredentialsResponse {
+            success: true,
+            message: format!("成功导出 {} 个凭据", count),
+            count,
+            credentials,
+        }
+    }
+
+    /// 批量导入凭据
+    pub async fn import_credentials(
+        &self,
+        items: Vec<ImportCredentialItem>,
+    ) -> ImportCredentialsResponse {
+        let mut success_count = 0;
+        let mut failures = Vec::new();
+
+        for (index, item) in items.into_iter().enumerate() {
+            // 根据 client_id 和 client_secret 判断认证方式
+            let auth_method = if item.client_id.as_ref().map_or(false, |s| !s.is_empty())
+                && item.client_secret.as_ref().map_or(false, |s| !s.is_empty())
+            {
+                "idc".to_string()
+            } else {
+                "social".to_string()
+            };
+
+            let new_cred = KiroCredentials {
+                id: None,
+                access_token: None,
+                refresh_token: Some(item.refresh_token),
+                profile_arn: None,
+                expires_at: None,
+                auth_method: Some(auth_method),
+                client_id: item.client_id.filter(|s| !s.is_empty()),
+                client_secret: item.client_secret.filter(|s| !s.is_empty()),
+                priority: 0,
+                region: Some(item.region.unwrap_or_else(|| "us-east-1".to_string())),
+                machine_id: None,
+                proxy_url: item.proxy_url.filter(|s| !s.is_empty()),
+            };
+
+            match self.token_manager.add_credential(new_cred).await {
+                Ok(_) => success_count += 1,
+                Err(e) => failures.push(ImportFailure {
+                    index,
+                    error: e.to_string(),
+                }),
+            }
+        }
+
+        ImportCredentialsResponse {
+            success: failures.is_empty(),
+            message: if failures.is_empty() {
+                format!("成功导入 {} 个凭据", success_count)
+            } else {
+                format!(
+                    "导入完成: 成功 {}, 失败 {}",
+                    success_count,
+                    failures.len()
+                )
+            },
+            success_count,
+            failures,
         }
     }
 }

@@ -23,6 +23,34 @@ Rust 后端服务，将 Anthropic API 请求转换为 Kiro API 请求。
 | `.env.example` | 配置 | 环境变量示例 |
 | `Dockerfile` | 部署 | Docker 构建配置 |
 
+## Admin API 端点
+
+### 认证
+- `POST /api/admin/login` - 登录
+- `POST /api/admin/logout` - 登出
+- `GET /api/admin/me` - 获取当前用户
+- `POST /api/admin/change-password` - 修改密码
+
+### 凭据管理
+- `GET /api/admin/credentials` - 获取所有凭据
+- `POST /api/admin/credentials` - 添加凭据
+- `PUT /api/admin/credentials/:id` - 更新凭据
+- `DELETE /api/admin/credentials/:id` - 删除凭据
+- `POST /api/admin/credentials/:id/disabled` - 禁用/启用
+- `POST /api/admin/credentials/:id/priority` - 设置优先级
+- `POST /api/admin/credentials/:id/reset` - 重置失败计数
+- `POST /api/admin/credentials/:id/use` - 使用此账号
+- `GET /api/admin/credentials/:id/balance` - 获取余额
+- `POST /api/admin/credentials/refresh` - 刷新所有余额
+
+### 导入导出
+- `POST /api/admin/credentials/export` - 导出凭据
+- `POST /api/admin/credentials/import` - 批量导入凭据
+
+### 系统设置
+- `GET /api/admin/settings` - 获取设置
+- `POST /api/admin/settings` - 更新设置
+
 ## 快速开始
 
 ```bash
@@ -65,3 +93,44 @@ cargo build --release
 | `count_tokens_api_key` | - | count_tokens API 密钥 |
 | `count_tokens_auth_type` | `x-api-key` | count_tokens 认证类型 |
 | `min_usage_threshold` | `5` | 最小使用量阈值 |
+
+## 导入导出格式
+
+### 导出格式
+
+```json
+[
+  {
+    "refreshToken": "...",
+    "clientId": "",
+    "clientSecret": "",
+    "region": "us-east-1",
+    "proxyUrl": ""
+  }
+]
+```
+
+### 导入格式
+
+支持单个对象或数组：
+
+```json
+// 单个凭据
+{
+  "refreshToken": "...",
+  "clientId": "",
+  "clientSecret": ""
+}
+
+// 多个凭据
+[
+  { "refreshToken": "token1" },
+  { "refreshToken": "token2", "clientId": "...", "clientSecret": "..." }
+]
+```
+
+字段说明：
+- `refreshToken`: 必填
+- `clientId` + `clientSecret`: 都有值则为 IdC 模式，否则为 Social 模式
+- `region`: 可选，默认 `us-east-1`
+- `proxyUrl`: 可选，默认为空

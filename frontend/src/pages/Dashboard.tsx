@@ -1,5 +1,5 @@
 // Dashboard 页面
-// Input: credentialsApi, authApi
+// Input: credentialsApi, authApi, importExportApi
 // Output: 凭据管理界面
 // Pos: 主管理界面
 
@@ -33,8 +33,10 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { authApi, credentialsApi, type CredentialItem, type UserInfo } from '@/api';
-import { User, Plus, DotsThreeVertical, Gear, SignOut, Envelope, ArrowsClockwise, ArrowsCounterClockwise, Sun, Moon } from '@phosphor-icons/react';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { authApi, credentialsApi, importExportApi, type CredentialItem, type UserInfo, type ImportCredentialItem } from '@/api';
+import { User, Plus, DotsThreeVertical, Gear, SignOut, Envelope, ArrowsClockwise, ArrowsCounterClockwise, Sun, Moon, Export, UploadSimple, Play } from '@phosphor-icons/react';
 import { useTheme } from '@/hooks/useTheme';
 
 export default function DashboardPage() {
@@ -48,6 +50,9 @@ export default function DashboardPage() {
   const [showSettingsDialog, setShowSettingsDialog] = useState(false);
   const [editingCredential, setEditingCredential] = useState<CredentialItem | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [importJson, setImportJson] = useState('');
+  const [addTab, setAddTab] = useState<'single' | 'batch'>('single');
   const [addForm, setAddForm] = useState({
     refreshToken: '',
     authMethod: 'social',
@@ -292,6 +297,95 @@ export default function DashboardPage() {
     }
   };
 
+  // 多选相关
+  const toggleSelect = (id: number) => {
+    const newSelected = new Set(selectedIds);
+    if (newSelected.has(id)) {
+      newSelected.delete(id);
+    } else {
+      newSelected.add(id);
+    }
+    setSelectedIds(newSelected);
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === credentials.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(credentials.map(c => c.id)));
+    }
+  };
+
+  // 使用此账号
+  const handleUseCurrent = async (id: number) => {
+    try {
+      await importExportApi.useCurrent(id);
+      toast.success(`已切换到凭据 #${id}`);
+      refreshCredentials();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '切换失败');
+    }
+  };
+
+  // 导出凭据
+  const handleExport = async () => {
+    if (selectedIds.size === 0) {
+      toast.error('请先选择要导出的凭据');
+      return;
+    }
+
+    try {
+      const ids = Array.from(selectedIds);
+      const res = await importExportApi.export({ ids });
+
+      // 下载 JSON 文件
+      const blob = new Blob([JSON.stringify(res.credentials, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `kiro-credentials-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      toast.success(`成功导出 ${res.count} 个凭据`);
+      setSelectedIds(new Set());
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '导出失败');
+    }
+  };
+
+  // 导入凭据
+  const handleImport = async () => {
+    if (!importJson.trim()) {
+      toast.error('请输入 JSON 数据');
+      return;
+    }
+
+    try {
+      const data = JSON.parse(importJson) as ImportCredentialItem | ImportCredentialItem[];
+      const res = await importExportApi.import(data);
+
+      if (res.failures.length > 0) {
+        toast.warning(`导入完成: ${res.successCount} 成功, ${res.failures.length} 失败`);
+      } else {
+        toast.success(`成功导入 ${res.successCount} 个凭据`);
+      }
+
+      setShowAddDialog(false);
+      setImportJson('');
+      setAddTab('single');
+      refreshCredentials();
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        toast.error('JSON 格式错误');
+      } else {
+        toast.error(err instanceof Error ? err.message : '导入失败');
+      }
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -351,6 +445,15 @@ export default function DashboardPage() {
                 <ArrowsClockwise size={16} className={`mr-1 ${refreshing ? 'animate-spin' : ''}`} />
                 {refreshing ? '刷新中...' : '刷新 Token'}
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleExport}
+                disabled={selectedIds.size === 0}
+              >
+                <Export size={16} className="mr-1" />
+                导出 Token {selectedIds.size > 0 && `(${selectedIds.size})`}
+              </Button>
               <Button size="sm" onClick={() => setShowAddDialog(true)}>
                 <Plus size={16} className="mr-1" />
                 添加凭据
@@ -361,6 +464,12 @@ export default function DashboardPage() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-10">
+                    <Checkbox
+                      checked={credentials.length > 0 && selectedIds.size === credentials.length}
+                      onCheckedChange={toggleSelectAll}
+                    />
+                  </TableHead>
                   <TableHead>ID</TableHead>
                   <TableHead>Email</TableHead>
                   <TableHead>订阅计划</TableHead>
@@ -373,13 +482,19 @@ export default function DashboardPage() {
               <TableBody>
                 {credentials.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
                       暂无凭据，点击"添加凭据"开始
                     </TableCell>
                   </TableRow>
                 ) : (
                   credentials.map((cred) => (
                     <TableRow key={cred.id}>
+                      <TableCell>
+                        <Checkbox
+                          checked={selectedIds.has(cred.id)}
+                          onCheckedChange={() => toggleSelect(cred.id)}
+                        />
+                      </TableCell>
                       <TableCell>
                         #{cred.id}
                         {cred.isCurrent && (
@@ -406,6 +521,8 @@ export default function DashboardPage() {
                         {cred.disabled ? (
                           cred.disabledReason === 'suspended' ? (
                             <Badge variant="destructive">暂停</Badge>
+                          ) : cred.disabledReason === 'quota' ? (
+                            <Badge variant="destructive">额度用尽</Badge>
                           ) : (
                             <Badge variant="secondary">禁用</Badge>
                           )
@@ -428,6 +545,12 @@ export default function DashboardPage() {
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
+                            {!cred.isCurrent && !cred.disabled && cred.failureCount === 0 && (
+                              <DropdownMenuItem onClick={() => handleUseCurrent(cred.id)}>
+                                <Play size={16} className="mr-2" />
+                                使用此账号
+                              </DropdownMenuItem>
+                            )}
                             <DropdownMenuItem onClick={() => openEditDialog(cred)}>
                               编辑
                             </DropdownMenuItem>
@@ -458,93 +581,144 @@ export default function DashboardPage() {
       </main>
 
       {/* 添加凭据对话框 */}
-      <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
-        <DialogContent>
+      <Dialog open={showAddDialog} onOpenChange={(open) => {
+        setShowAddDialog(open);
+        if (!open) {
+          setAddTab('single');
+          setImportJson('');
+        }
+      }}>
+        <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>添加凭据</DialogTitle>
             <DialogDescription>
-              添加新的 Kiro 凭据
+              添加单个凭据或批量导入
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label>Refresh Token *</Label>
-              <Input
-                placeholder="请输入 Refresh Token"
-                value={addForm.refreshToken}
-                onChange={(e) => setAddForm({ ...addForm, refreshToken: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>认证方式</Label>
-              <select
-                className="w-full h-10 px-3 rounded-md border bg-background"
-                value={addForm.authMethod}
-                onChange={(e) => setAddForm({ ...addForm, authMethod: e.target.value })}
-              >
-                <option value="social">Social</option>
-                <option value="idc">IdC</option>
-              </select>
-            </div>
-            {addForm.authMethod === 'idc' && (
-              <>
-                <div className="space-y-2">
-                  <Label>Client ID</Label>
-                  <Input
-                    placeholder="请输入 Client ID"
-                    value={addForm.clientId}
-                    onChange={(e) => setAddForm({ ...addForm, clientId: e.target.value })}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Client Secret</Label>
-                  <Input
-                    type="password"
-                    placeholder="请输入 Client Secret"
-                    value={addForm.clientSecret}
-                    onChange={(e) => setAddForm({ ...addForm, clientSecret: e.target.value })}
-                  />
-                </div>
-              </>
-            )}
-            <div className="space-y-2">
-              <Label>优先级</Label>
-              <Input
-                type="number"
-                placeholder="0"
-                value={addForm.priority}
-                onChange={(e) => setAddForm({ ...addForm, priority: parseInt(e.target.value) || 0 })}
-              />
-              <p className="text-xs text-muted-foreground">数字越小优先级越高</p>
-            </div>
-            <div className="space-y-2">
-              <Label>AWS Region</Label>
-              <select
-                className="w-full h-10 px-3 rounded-md border bg-background"
-                value={addForm.region}
-                onChange={(e) => setAddForm({ ...addForm, region: e.target.value })}
-              >
-                <option value="us-east-1">us-east-1 (N. Virginia)</option>
-                <option value="us-west-2">us-west-2 (Oregon)</option>
-                <option value="eu-west-1">eu-west-1 (Ireland)</option>
-              </select>
-            </div>
-            <div className="space-y-2">
-              <Label>代理 URL</Label>
-              <Input
-                placeholder="http://proxy:port 或 socks5://proxy:port（可选）"
-                value={addForm.proxyUrl}
-                onChange={(e) => setAddForm({ ...addForm, proxyUrl: e.target.value })}
-              />
-              <p className="text-xs text-muted-foreground">支持 http/https/socks5 代理，留空则不使用代理</p>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowAddDialog(false)}>
-              取消
-            </Button>
-            <Button onClick={handleAddCredential}>添加</Button>
-          </DialogFooter>
+          <Tabs value={addTab} onValueChange={(v) => setAddTab(v as 'single' | 'batch')}>
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="single">单个添加</TabsTrigger>
+              <TabsTrigger value="batch">批量导入</TabsTrigger>
+            </TabsList>
+            <TabsContent value="single" className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label>Refresh Token *</Label>
+                <Input
+                  placeholder="请输入 Refresh Token"
+                  value={addForm.refreshToken}
+                  onChange={(e) => setAddForm({ ...addForm, refreshToken: e.target.value })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>认证方式</Label>
+                <select
+                  className="w-full h-10 px-3 rounded-md border bg-background"
+                  value={addForm.authMethod}
+                  onChange={(e) => setAddForm({ ...addForm, authMethod: e.target.value })}
+                >
+                  <option value="social">Social</option>
+                  <option value="idc">IdC</option>
+                </select>
+              </div>
+              {addForm.authMethod === 'idc' && (
+                <>
+                  <div className="space-y-2">
+                    <Label>Client ID</Label>
+                    <Input
+                      placeholder="请输入 Client ID"
+                      value={addForm.clientId}
+                      onChange={(e) => setAddForm({ ...addForm, clientId: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Client Secret</Label>
+                    <Input
+                      type="password"
+                      placeholder="请输入 Client Secret"
+                      value={addForm.clientSecret}
+                      onChange={(e) => setAddForm({ ...addForm, clientSecret: e.target.value })}
+                    />
+                  </div>
+                </>
+              )}
+              <div className="space-y-2">
+                <Label>优先级</Label>
+                <Input
+                  type="number"
+                  placeholder="0"
+                  value={addForm.priority}
+                  onChange={(e) => setAddForm({ ...addForm, priority: parseInt(e.target.value) || 0 })}
+                />
+                <p className="text-xs text-muted-foreground">数字越小优先级越高</p>
+              </div>
+              <div className="space-y-2">
+                <Label>AWS Region</Label>
+                <select
+                  className="w-full h-10 px-3 rounded-md border bg-background"
+                  value={addForm.region}
+                  onChange={(e) => setAddForm({ ...addForm, region: e.target.value })}
+                >
+                  <option value="us-east-1">us-east-1 (N. Virginia)</option>
+                  <option value="us-west-2">us-west-2 (Oregon)</option>
+                  <option value="eu-west-1">eu-west-1 (Ireland)</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label>代理 URL</Label>
+                <Input
+                  placeholder="http://proxy:port 或 socks5://proxy:port（可选）"
+                  value={addForm.proxyUrl}
+                  onChange={(e) => setAddForm({ ...addForm, proxyUrl: e.target.value })}
+                />
+                <p className="text-xs text-muted-foreground">支持 http/https/socks5 代理，留空则不使用代理</p>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setShowAddDialog(false)}>
+                  取消
+                </Button>
+                <Button onClick={handleAddCredential}>添加</Button>
+              </DialogFooter>
+            </TabsContent>
+            <TabsContent value="batch" className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label>JSON 数据</Label>
+                <textarea
+                  className="w-full h-64 px-3 py-2 rounded-md border bg-background font-mono text-sm resize-none"
+                  placeholder={`支持以下格式：
+
+单个凭据：
+{
+  "refreshToken": "your_refresh_token",
+  "clientId": "",
+  "clientSecret": ""
+}
+
+多个凭据：
+[
+  { "refreshToken": "token1" },
+  { "refreshToken": "token2", "clientId": "...", "clientSecret": "..." }
+]
+
+说明：
+- refreshToken: 必填
+- clientId + clientSecret: 都有值则为 IdC 模式，否则为 Social 模式
+- region: 可选，默认 us-east-1
+- proxyUrl: 可选，默认为空`}
+                  value={importJson}
+                  onChange={(e) => setImportJson(e.target.value)}
+                />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setShowAddDialog(false)}>
+                  取消
+                </Button>
+                <Button onClick={handleImport}>
+                  <UploadSimple size={16} className="mr-1" />
+                  导入
+                </Button>
+              </DialogFooter>
+            </TabsContent>
+          </Tabs>
         </DialogContent>
       </Dialog>
 

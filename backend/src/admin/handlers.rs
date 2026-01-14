@@ -15,9 +15,10 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use super::{
     middleware::{AdminState, AUTH_COOKIE_NAME},
     types::{
-        AddCredentialRequest, ChangePasswordRequest, LoginRequest, LoginResponse,
-        SetDisabledRequest, SetPriorityRequest, SettingsResponse, SuccessResponse,
-        UpdateCredentialRequest, UpdateSettingsRequest, UserInfoResponse,
+        AddCredentialRequest, ChangePasswordRequest, ExportCredentialsRequest,
+        ImportCredentialsRequest, LoginRequest, LoginResponse, SetDisabledRequest,
+        SetPriorityRequest, SettingsResponse, SuccessResponse, UpdateCredentialRequest,
+        UpdateSettingsRequest, UserInfoResponse,
     },
 };
 use crate::jwt::Claims;
@@ -359,4 +360,39 @@ pub async fn update_settings(
                 .into_response()
         }
     }
+}
+
+// ============ 导入导出 ============
+
+/// POST /api/admin/credentials/:id/use
+/// 使用此账号（设置为当前凭据）
+pub async fn set_current_credential(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.set_current(id) {
+        Ok(_) => Json(SuccessResponse::new(format!("已切换到凭据 #{}", id))).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/export
+/// 导出凭据
+pub async fn export_credentials(
+    State(state): State<AdminState>,
+    Json(payload): Json<ExportCredentialsRequest>,
+) -> impl IntoResponse {
+    let response = state.service.export_credentials(payload);
+    Json(response)
+}
+
+/// POST /api/admin/credentials/import
+/// 批量导入凭据
+pub async fn import_credentials(
+    State(state): State<AdminState>,
+    Json(payload): Json<ImportCredentialsRequest>,
+) -> impl IntoResponse {
+    let items = payload.into_vec();
+    let response = state.service.import_credentials(items).await;
+    Json(response)
 }

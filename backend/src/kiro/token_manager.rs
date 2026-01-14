@@ -1550,6 +1550,58 @@ impl MultiTokenManager {
 
         Ok(())
     }
+
+    /// 设置当前使用的凭据（Admin API - 使用此账号）
+    ///
+    /// 直接切换到指定凭据，无需修改优先级
+    /// 只有状态正常（未禁用且无失败记录）的凭据才能被使用
+    pub fn set_current(&self, id: u64) -> anyhow::Result<()> {
+        let entries = self.entries.lock();
+
+        // 检查凭据是否存在
+        let entry = entries
+            .iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+
+        // 检查凭据是否已禁用
+        if entry.disabled {
+            let reason = match entry.disabled_reason {
+                Some(DisabledReason::Manual) => "已被手动禁用",
+                Some(DisabledReason::TooManyFailures) => "连续失败次数过多",
+                Some(DisabledReason::QuotaExceeded) => "额度已用尽",
+                Some(DisabledReason::AccountSuspended) => "账号已被暂停",
+                None => "已被禁用",
+            };
+            anyhow::bail!("无法使用凭据 #{}：{}", id, reason);
+        }
+
+        // 检查是否有失败记录
+        if entry.failure_count > 0 {
+            anyhow::bail!(
+                "凭据 #{} 当前有 {} 次失败记录，请先重置失败计数",
+                id,
+                entry.failure_count
+            );
+        }
+
+        drop(entries);
+
+        // 更新 current_id
+        let mut current_id = self.current_id.lock();
+        *current_id = id;
+
+        tracing::info!("已切换到凭据 #{}", id);
+        Ok(())
+    }
+
+    /// 获取所有凭据用于导出（Admin API）
+    ///
+    /// 返回所有凭据的完整信息（包含敏感字段如 refresh_token）
+    pub fn get_all_credentials_for_export(&self) -> Vec<KiroCredentials> {
+        let entries = self.entries.lock();
+        entries.iter().map(|e| e.credentials.clone()).collect()
+    }
 }
 
 #[cfg(test)]

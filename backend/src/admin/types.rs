@@ -322,3 +322,107 @@ pub struct UpdateSettingsRequest {
     pub count_tokens_api_key: Option<String>,
     pub count_tokens_auth_type: Option<String>,
 }
+
+// ============ 导入导出 ============
+
+/// 导出凭据项（用于导出 JSON）
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportCredentialItem {
+    /// 刷新令牌
+    pub refresh_token: String,
+    /// OIDC Client ID（IdC 认证需要）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// OIDC Client Secret（IdC 认证需要）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// AWS Region
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// 代理 URL
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
+}
+
+/// 导出凭据请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportCredentialsRequest {
+    /// 要导出的凭据 ID 列表（为空则导出全部）
+    pub ids: Option<Vec<u64>>,
+}
+
+/// 导出凭据响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportCredentialsResponse {
+    pub success: bool,
+    pub message: String,
+    /// 导出的凭据数量
+    pub count: usize,
+    /// 导出的凭据数据
+    pub credentials: Vec<ExportCredentialItem>,
+}
+
+/// 导入凭据项（用于导入 JSON）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCredentialItem {
+    /// 刷新令牌（必填）
+    pub refresh_token: String,
+    /// OIDC Client ID（可选，有值则为 IdC 模式）
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// OIDC Client Secret（可选，有值则为 IdC 模式）
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// AWS Region（可选，默认 us-east-1）
+    #[serde(default)]
+    pub region: Option<String>,
+    /// 代理 URL（可选，默认为空）
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+}
+
+/// 导入凭据请求（支持单个对象或数组）
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ImportCredentialsRequest {
+    /// 单个凭据
+    Single(ImportCredentialItem),
+    /// 多个凭据
+    Multiple(Vec<ImportCredentialItem>),
+}
+
+impl ImportCredentialsRequest {
+    /// 转换为凭据列表
+    pub fn into_vec(self) -> Vec<ImportCredentialItem> {
+        match self {
+            ImportCredentialsRequest::Single(item) => vec![item],
+            ImportCredentialsRequest::Multiple(items) => items,
+        }
+    }
+}
+
+/// 导入凭据响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCredentialsResponse {
+    pub success: bool,
+    pub message: String,
+    /// 成功导入的数量
+    pub success_count: usize,
+    /// 导入失败的列表
+    pub failures: Vec<ImportFailure>,
+}
+
+/// 导入失败信息
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFailure {
+    /// 索引（从 0 开始）
+    pub index: usize,
+    /// 错误信息
+    pub error: String,
+}
