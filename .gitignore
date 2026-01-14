@@ -40,3 +40,4 @@ frontend/tsconfig.tsbuildinfo
 ._*
 ._.git
 backend/Cargo.lock
+kiro.rs
