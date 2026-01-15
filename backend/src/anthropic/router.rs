@@ -2,6 +2,7 @@
 
 use axum::{
     Router, middleware,
+    extract::DefaultBodyLimit,
     routing::{get, post},
 };
 
@@ -55,5 +56,6 @@ pub fn create_router_with_provider(
     Router::new()
         .nest("/v1", v1_routes)
         .layer(cors_layer())
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB
         .with_state(state)
 }

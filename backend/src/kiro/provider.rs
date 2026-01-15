@@ -229,7 +229,22 @@ impl KiroProvider {
     /// # Returns
     /// 返回原始的 HTTP Response，不做解析
     pub async fn call_api(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
-        self.call_api_with_retry(request_body, false).await
+        self.call_api_internal(request_body, false, None).await
+    }
+
+    /// 发送非流式 API 请求（带 session ID）
+    ///
+    /// 支持 session 粘性调度（auto 模式下）
+    ///
+    /// # Arguments
+    /// * `request_body` - JSON 格式的请求体字符串
+    /// * `session_id` - 可选的 session ID，用于粘性调度
+    pub async fn call_api_with_session(
+        &self,
+        request_body: &str,
+        session_id: Option<String>,
+    ) -> anyhow::Result<reqwest::Response> {
+        self.call_api_internal(request_body, false, session_id).await
     }
 
     /// 发送流式 API 请求
@@ -246,7 +261,22 @@ impl KiroProvider {
     /// # Returns
     /// 返回原始的 HTTP Response，调用方负责处理流式数据
     pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
-        self.call_api_with_retry(request_body, true).await
+        self.call_api_internal(request_body, true, None).await
+    }
+
+    /// 发送流式 API 请求（带 session ID）
+    ///
+    /// 支持 session 粘性调度（auto 模式下）
+    ///
+    /// # Arguments
+    /// * `request_body` - JSON 格式的请求体字符串
+    /// * `session_id` - 可选的 session ID，用于粘性调度
+    pub async fn call_api_stream_with_session(
+        &self,
+        request_body: &str,
+        session_id: Option<String>,
+    ) -> anyhow::Result<reqwest::Response> {
+        self.call_api_internal(request_body, true, session_id).await
     }
 
     /// 发送 MCP API 请求
@@ -395,10 +425,11 @@ impl KiroProvider {
     /// - 每个凭据最多重试 MAX_RETRIES_PER_CREDENTIAL 次
     /// - 总重试次数 = min(凭据数量 × 每凭据重试次数, MAX_TOTAL_RETRIES)
     /// - 硬上限 9 次，避免无限重试
-    async fn call_api_with_retry(
+    async fn call_api_internal(
         &self,
         request_body: &str,
         is_stream: bool,
+        session_id: Option<String>,
     ) -> anyhow::Result<reqwest::Response> {
         let total_credentials = self.token_manager.total_count();
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
@@ -407,7 +438,8 @@ impl KiroProvider {
 
         for attempt in 0..max_retries {
             // 获取调用上下文（绑定 index、credentials、token）
-            let ctx = match self.token_manager.acquire_context().await {
+            // 使用 acquire_context_with_session 支持调度模式和 session 粘性
+            let ctx = match self.token_manager.acquire_context_with_session(session_id.as_deref()).await {
                 Ok(c) => c,
                 Err(e) => {
                     last_error = Some(e);
@@ -479,6 +511,11 @@ impl KiroProvider {
                     status,
                     body
                 );
+
+                // 立即刷新该凭据的额度信息，确保数据库中的数据是最新的
+                if let Err(e) = self.token_manager.refresh_balance(ctx.id).await {
+                    tracing::warn!("刷新凭据 #{} 额度失败: {}", ctx.id, e);
+                }
 
                 let has_available = self.token_manager.report_quota_exhausted(ctx.id);
                 if !has_available {
@@ -611,7 +648,7 @@ mod tests {
     use crate::model::runtime_config::RuntimeConfig;
 
     fn create_test_provider(config: RuntimeConfig, credentials: KiroCredentials) -> KiroProvider {
-        let tm = MultiTokenManager::new(config, vec![credentials], None).unwrap();
+        let tm = MultiTokenManager::new(config, vec![credentials]).unwrap();
         KiroProvider::new(Arc::new(tm))
     }
 

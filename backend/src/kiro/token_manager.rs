@@ -8,6 +8,7 @@ use anyhow::bail;
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::Mutex;
 use serde::Serialize;
+use std::collections::HashMap;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::db::Database;
@@ -411,6 +412,39 @@ enum DisabledReason {
     AccountSuspended,
 }
 
+/// 调度模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulingMode {
+    /// 固定模式：一直用一个账号，根据报错自动切换
+    Fixed,
+    /// 自动模式：自动选择最多额度的账号，支持 session 粘性
+    Auto,
+}
+
+impl Default for SchedulingMode {
+    fn default() -> Self {
+        Self::Fixed
+    }
+}
+
+impl SchedulingMode {
+    /// 从字符串解析调度模式
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "auto" => Self::Auto,
+            _ => Self::Fixed,
+        }
+    }
+
+    /// 转换为字符串
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fixed => "fixed",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 // ============================================================================
 // Admin API 公开结构
 // ============================================================================
@@ -473,12 +507,14 @@ pub struct MultiTokenManager {
     config: RuntimeConfig,
     /// 凭据条目列表
     entries: Mutex<Vec<CredentialEntry>>,
-    /// 当前活动凭据 ID
+    /// 当前活动凭据 ID（fixed 模式使用）
     current_id: Mutex<u64>,
     /// Token 刷新锁，确保同一时间只有一个刷新操作
     refresh_lock: TokioMutex<()>,
     /// 数据库连接（用于持久化）
     db: Option<Database>,
+    /// Session 到凭据 ID 的映射（auto 模式下的粘性调度）
+    session_mapping: Mutex<HashMap<String, u64>>,
 }
 
 /// 每个凭据最大 API 调用失败次数
@@ -547,6 +583,7 @@ impl MultiTokenManager {
             current_id: Mutex::new(initial_id),
             refresh_lock: TokioMutex::new(()),
             db: Some(db),
+            session_mapping: Mutex::new(HashMap::new()),
         })
     }
 
@@ -610,6 +647,7 @@ impl MultiTokenManager {
             current_id: Mutex::new(initial_id),
             refresh_lock: TokioMutex::new(()),
             db: None,
+            session_mapping: Mutex::new(HashMap::new()),
         })
     }
 
@@ -637,6 +675,264 @@ impl MultiTokenManager {
     /// 获取可用凭据数量
     pub fn available_count(&self) -> usize {
         self.entries.lock().iter().filter(|e| !e.disabled).count()
+    }
+
+    /// 获取当前调度模式
+    pub fn get_scheduling_mode(&self) -> SchedulingMode {
+        self.db
+            .as_ref()
+            .and_then(|db| db.get_setting("scheduling_mode").ok().flatten())
+            .map(|s| SchedulingMode::from_str(&s))
+            .unwrap_or_default()
+    }
+
+    /// 根据调度模式和 session 获取 API 调用上下文
+    ///
+    /// # Arguments
+    /// * `session_id` - 可选的 session ID，用于 auto 模式下的粘性调度
+    ///
+    /// # 调度逻辑
+    /// - fixed 模式：使用当前凭据，报错时自动切换
+    /// - auto 模式：
+    ///   - 如果有 session_id 且已有映射，使用映射的凭据
+    ///   - 否则选择剩余额度最多的凭据，并记录映射
+    pub async fn acquire_context_with_session(
+        &self,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<CallContext> {
+        let mode = self.get_scheduling_mode();
+
+        match mode {
+            SchedulingMode::Fixed => {
+                // 固定模式：使用原有逻辑
+                self.acquire_context().await
+            }
+            SchedulingMode::Auto => {
+                // 自动模式：支持 session 粘性调度
+                self.acquire_context_auto(session_id).await
+            }
+        }
+    }
+
+    /// Auto 模式下获取 API 调用上下文
+    ///
+    /// 支持 session 粘性调度：
+    /// - 如果有 session_id 且已有映射，优先使用映射的凭据
+    /// - 否则选择剩余额度最多的可用凭据
+    async fn acquire_context_auto(&self, session_id: Option<&str>) -> anyhow::Result<CallContext> {
+        let total = self.total_count();
+        let mut tried_count = 0;
+
+        loop {
+            if tried_count >= total {
+                anyhow::bail!(
+                    "所有凭据均无法获取有效 Token（可用: {}/{}）",
+                    self.available_count(),
+                    total
+                );
+            }
+
+            // 选择凭据（在同步块内完成，不跨越 await）
+            let selection_result = self.select_credential_for_auto(session_id);
+
+            let (id, credentials) = match selection_result {
+                Ok((id, creds)) => (id, creds),
+                Err(e) => return Err(e),
+            };
+
+            // 尝试获取/刷新 Token（在锁释放后）
+            match self.try_ensure_token(id, &credentials).await {
+                Ok(ctx) => {
+                    return Ok(ctx);
+                }
+                Err(e) => {
+                    tracing::warn!("凭据 #{} Token 刷新失败，尝试下一个凭据: {}", id, e);
+
+                    // 清除该凭据的 session 映射
+                    if let Some(sid) = session_id {
+                        let mut session_mapping = self.session_mapping.lock();
+                        session_mapping.remove(sid);
+                    }
+
+                    tried_count += 1;
+                }
+            }
+        }
+    }
+
+    /// 为 Auto 模式选择凭据（同步方法，不跨越 await）
+    ///
+    /// Auto 模式逻辑：
+    /// 1. 优先使用 session 粘性映射的凭据（如果仍然可用）
+    /// 2. 否则按优先级顺序选择第一个可用凭据
+    /// 3. 自动剔除：禁用、暂停、额度用尽等问题账号
+    fn select_credential_for_auto(
+        &self,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<(u64, KiroCredentials)> {
+        let entries = self.entries.lock();
+
+        // 从数据库获取 usage 信息，用于判断额度是否用尽
+        let usage_map: HashMap<u64, (f64, f64)> = self
+            .db
+            .as_ref()
+            .and_then(|db| {
+                db.get_all_credentials().ok().map(|rows| {
+                    rows.into_iter()
+                        .map(|r| (r.id as u64, (r.current_usage, r.usage_limit)))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+
+        // 获取最低额度阈值
+        let min_threshold = self
+            .db
+            .as_ref()
+            .and_then(|db| db.get_setting("min_usage_threshold").ok().flatten())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(5.0);
+
+        // 判断凭据是否可用（未禁用且额度充足）
+        let is_credential_available = |entry: &CredentialEntry| -> bool {
+            if entry.disabled {
+                return false;
+            }
+            // 检查额度是否充足
+            if let Some(&(current_usage, usage_limit)) = usage_map.get(&entry.id) {
+                let remaining = usage_limit - current_usage;
+                if remaining < min_threshold {
+                    return false;
+                }
+            }
+            true
+        };
+
+        // 1. 检查 session 粘性映射
+        if let Some(sid) = session_id {
+            let session_mapping = self.session_mapping.lock();
+            if let Some(&mapped_id) = session_mapping.get(sid) {
+                // 检查映射的凭据是否仍然可用
+                if let Some(entry) = entries.iter().find(|e| e.id == mapped_id) {
+                    if is_credential_available(entry) {
+                        return Ok((entry.id, entry.credentials.clone()));
+                    }
+                    // 映射的凭据不可用，记录日志
+                    tracing::debug!(
+                        "Session {} 映射的凭据 #{} 不可用，重新选择",
+                        sid,
+                        mapped_id
+                    );
+                }
+            }
+        }
+
+        // 2. 按优先级顺序选择第一个可用凭据
+        // 优先级相同时，按 ID 顺序（先添加的优先）
+        let best = entries
+            .iter()
+            .filter(|e| is_credential_available(e))
+            .min_by_key(|e| (e.credentials.priority, e.id));
+
+        if let Some(entry) = best {
+            let id = entry.id;
+            let creds = entry.credentials.clone();
+
+            // 记录 session 映射
+            if let Some(sid) = session_id {
+                let mut session_mapping = self.session_mapping.lock();
+                session_mapping.insert(sid.to_string(), id);
+                tracing::debug!("Session {} 映射到凭据 #{}", sid, id);
+            }
+
+            return Ok((id, creds));
+        }
+
+        // 没有可用凭据，尝试自愈
+        drop(entries);
+        let mut entries = self.entries.lock();
+
+        if entries.iter().any(|e| {
+            e.disabled && e.disabled_reason == Some(DisabledReason::TooManyFailures)
+        }) {
+            tracing::warn!(
+                "所有凭据均已被自动禁用，执行自愈：重置失败计数并重新启用"
+            );
+            for e in entries.iter_mut() {
+                if e.disabled_reason == Some(DisabledReason::TooManyFailures) {
+                    e.disabled = false;
+                    e.disabled_reason = None;
+                    e.failure_count = 0;
+                }
+            }
+
+            // 重新选择（按优先级顺序）
+            let best = entries
+                .iter()
+                .filter(|e| !e.disabled)
+                .min_by_key(|e| e.credentials.priority);
+
+            if let Some(entry) = best {
+                let id = entry.id;
+                let creds = entry.credentials.clone();
+                if let Some(sid) = session_id {
+                    let mut session_mapping = self.session_mapping.lock();
+                    session_mapping.insert(sid.to_string(), id);
+                }
+                return Ok((id, creds));
+            }
+        }
+
+        let available = entries.iter().filter(|e| !e.disabled).count();
+        let total = entries.len();
+        anyhow::bail!("所有凭据均已禁用或额度用尽（可用: {}/{}）", available, total)
+    }
+
+    /// 选择剩余额度最多的可用凭据（保留用于其他场景）
+    ///
+    /// 从数据库读取 usage 信息，选择 (usage_limit - current_usage) 最大的凭据
+    #[allow(dead_code)]
+    fn select_best_by_remaining_quota<'a>(
+        &self,
+        entries: &'a [CredentialEntry],
+    ) -> Option<&'a CredentialEntry> {
+        // 从数据库获取 usage 信息
+        let usage_map: HashMap<u64, (f64, f64)> = self
+            .db
+            .as_ref()
+            .and_then(|db| {
+                db.get_all_credentials().ok().map(|rows| {
+                    rows.into_iter()
+                        .map(|r| (r.id as u64, (r.current_usage, r.usage_limit)))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+
+        entries
+            .iter()
+            .filter(|e| !e.disabled)
+            .max_by(|a, b| {
+                let (a_usage, a_limit) = usage_map.get(&a.id).copied().unwrap_or((0.0, 0.0));
+                let (b_usage, b_limit) = usage_map.get(&b.id).copied().unwrap_or((0.0, 0.0));
+                let a_remaining = a_limit - a_usage;
+                let b_remaining = b_limit - b_usage;
+                a_remaining
+                    .partial_cmp(&b_remaining)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
+    /// 清除指定 session 的映射
+    pub fn clear_session_mapping(&self, session_id: &str) {
+        let mut session_mapping = self.session_mapping.lock();
+        session_mapping.remove(session_id);
+    }
+
+    /// 清除所有 session 映射
+    pub fn clear_all_session_mappings(&self) {
+        let mut session_mapping = self.session_mapping.lock();
+        session_mapping.clear();
     }
 
     /// 获取 API 调用上下文
@@ -1503,6 +1799,13 @@ impl MultiTokenManager {
         (success_count, failures)
     }
 
+    /// 刷新指定凭据的余额（公开方法）
+    ///
+    /// 用于在请求失败时立即刷新该凭据的额度信息
+    pub async fn refresh_balance(&self, id: u64) -> anyhow::Result<()> {
+        self.refresh_balance_for(id).await
+    }
+
     /// 刷新单个凭据的余额信息
     async fn refresh_balance_for(&self, id: u64) -> anyhow::Result<()> {
         // 获取使用额度
@@ -1612,7 +1915,7 @@ mod tests {
     fn test_token_manager_new() {
         let config = RuntimeConfig::default();
         let credentials = KiroCredentials::default();
-        let tm = TokenManager::new(config, credentials, None);
+        let tm = TokenManager::new(config, credentials);
         assert!(tm.credentials().access_token.is_none());
     }
 
@@ -1687,7 +1990,7 @@ mod tests {
         cred2.priority = 1;
 
         let manager =
-            MultiTokenManager::new(config, vec![cred1, cred2], None).unwrap();
+            MultiTokenManager::new(config, vec![cred1, cred2]).unwrap();
         assert_eq!(manager.total_count(), 2);
         assert_eq!(manager.available_count(), 2);
     }
@@ -1695,7 +1998,7 @@ mod tests {
     #[test]
     fn test_multi_token_manager_empty_credentials() {
         let config = RuntimeConfig::default();
-        let result = MultiTokenManager::new(config, vec![], None);
+        let result = MultiTokenManager::new(config, vec![]);
         // 支持 0 个凭据启动（可通过管理面板添加）
         assert!(result.is_ok());
         let manager = result.unwrap();
@@ -1711,7 +2014,7 @@ mod tests {
         let mut cred2 = KiroCredentials::default();
         cred2.id = Some(1); // 重复 ID
 
-        let result = MultiTokenManager::new(config, vec![cred1, cred2], None);
+        let result = MultiTokenManager::new(config, vec![cred1, cred2]);
         assert!(result.is_err());
         let err_msg = result.err().unwrap().to_string();
         assert!(
@@ -1728,7 +2031,7 @@ mod tests {
         let cred2 = KiroCredentials::default();
 
         let manager =
-            MultiTokenManager::new(config, vec![cred1, cred2], None).unwrap();
+            MultiTokenManager::new(config, vec![cred1, cred2]).unwrap();
 
         // 凭据会自动分配 ID（从 1 开始）
         // 前两次失败不会禁用（使用 ID 1）
@@ -1752,7 +2055,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let cred = KiroCredentials::default();
 
-        let manager = MultiTokenManager::new(config, vec![cred], None).unwrap();
+        let manager = MultiTokenManager::new(config, vec![cred]).unwrap();
 
         // 失败两次（使用 ID 1）
         manager.report_failure(1);
@@ -1776,7 +2079,7 @@ mod tests {
         cred2.refresh_token = Some("token2".to_string());
 
         let manager =
-            MultiTokenManager::new(config, vec![cred1, cred2], None).unwrap();
+            MultiTokenManager::new(config, vec![cred1, cred2]).unwrap();
 
         // 初始是第一个凭据
         assert_eq!(
@@ -1803,7 +2106,7 @@ mod tests {
         cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
 
         let manager =
-            MultiTokenManager::new(config, vec![cred1, cred2], None).unwrap();
+            MultiTokenManager::new(config, vec![cred1, cred2]).unwrap();
 
         // 凭据会自动分配 ID（从 1 开始）
         for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
@@ -1828,7 +2131,7 @@ mod tests {
         let cred2 = KiroCredentials::default();
 
         let manager =
-            MultiTokenManager::new(config, vec![cred1, cred2], None).unwrap();
+            MultiTokenManager::new(config, vec![cred1, cred2]).unwrap();
 
         // 凭据会自动分配 ID（从 1 开始）
         assert_eq!(manager.available_count(), 2);
@@ -1847,7 +2150,7 @@ mod tests {
         let cred2 = KiroCredentials::default();
 
         let manager =
-            MultiTokenManager::new(config, vec![cred1, cred2], None).unwrap();
+            MultiTokenManager::new(config, vec![cred1, cred2]).unwrap();
 
         manager.report_quota_exhausted(1);
         manager.report_quota_exhausted(2);

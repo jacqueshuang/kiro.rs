@@ -299,6 +299,10 @@ pub async fn get_settings(State(state): State<AdminState>) -> impl IntoResponse 
         .ok()
         .flatten()
         .unwrap_or_else(|| "x-api-key".to_string());
+    let scheduling_mode = state.db.get_setting("scheduling_mode")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "fixed".to_string());
 
     Json(SettingsResponse {
         kiro_version,
@@ -308,6 +312,7 @@ pub async fn get_settings(State(state): State<AdminState>) -> impl IntoResponse 
         count_tokens_api_url,
         count_tokens_api_key,
         count_tokens_auth_type,
+        scheduling_mode,
     })
 }
 
@@ -339,6 +344,20 @@ pub async fn update_settings(
     }
     if let Some(ref v) = payload.count_tokens_auth_type {
         updates.push(("count_tokens_auth_type", v.clone()));
+    }
+    if let Some(ref v) = payload.scheduling_mode {
+        // 验证调度模式值
+        if v != "fixed" && v != "auto" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(SuccessResponse {
+                    success: false,
+                    message: "调度模式必须是 'fixed' 或 'auto'".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        updates.push(("scheduling_mode", v.clone()));
     }
 
     if updates.is_empty() {

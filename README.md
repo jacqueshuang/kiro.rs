@@ -17,6 +17,7 @@
 - **流式响应**: 支持 SSE (Server-Sent Events) 流式输出
 - **Token 自动刷新**: 自动管理和刷新 OAuth Token
 - **多凭据支持**: 支持配置多个凭据，按优先级自动故障转移
+- **智能调度**: 支持固定模式和自动模式，自动模式支持会话粘性调度
 - **智能重试**: 单凭据最多重试 3 次，单请求最多重试 9 次
 - **Thinking 模式**: 支持 Claude 的 extended thinking 功能
 - **工具调用**: 完整支持 function calling / tool use
@@ -110,6 +111,7 @@ JWT_EXPIRY_HOURS=24
 - `count_tokens_api_key` - count_tokens API 密钥
 - `count_tokens_auth_type` - count_tokens 认证类型（默认 x-api-key）
 - `min_usage_threshold` - 最小使用量阈值（默认 5）
+- `scheduling_mode` - 调度模式（fixed/auto，默认 fixed）
 
 </details>
 
@@ -225,6 +227,21 @@ kiro-rs/
 | `*haiku*` | `claude-haiku-4.5` |
 
 ## 高级功能
+
+### 调度模式
+
+支持两种凭据调度模式，可在 Admin 管理后台的「设置」页面配置：
+
+| 模式 | 说明 |
+|------|------|
+| `fixed` | 固定模式（默认）：一直使用当前凭据，报错时自动切换到下一个 |
+| `auto` | 自动模式：按优先级顺序使用凭据，自动跳过禁用/额度用尽的账号，支持会话粘性 |
+
+**自动模式特性：**
+- 按凭据优先级顺序选择可用凭据
+- 自动跳过已禁用、暂停、额度用尽的凭据
+- 支持会话粘性调度：同一会话的请求会尽量使用同一凭据
+- 请求失败时立即刷新凭据额度信息
 
 ### Thinking 模式
 

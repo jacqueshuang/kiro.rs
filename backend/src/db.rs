@@ -144,6 +144,8 @@ impl Database {
             ("node_version", "v22.12.0"),
             ("min_usage_threshold", "5"),
             ("count_tokens_auth_type", "x-api-key"),
+            // 调度模式: "fixed" = 固定模式（一直用一个账号，报错切换）, "auto" = 自动模式（选择最多额度）
+            ("scheduling_mode", "fixed"),
         ];
 
         for (key, value) in defaults {
@@ -689,6 +691,7 @@ mod tests {
             priority: 0,
             region: None,
             machine_id: None,
+            proxy_url: None,
         };
 
         let id = db.add_credential(&cred).unwrap();

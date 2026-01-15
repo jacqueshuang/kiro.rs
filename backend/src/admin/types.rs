@@ -308,6 +308,8 @@ pub struct SettingsResponse {
     pub count_tokens_api_url: Option<String>,
     pub count_tokens_api_key: Option<String>,
     pub count_tokens_auth_type: String,
+    /// 调度模式: "fixed" = 固定模式, "auto" = 自动模式
+    pub scheduling_mode: String,
 }
 
 /// 更新系统设置请求
@@ -321,6 +323,8 @@ pub struct UpdateSettingsRequest {
     pub count_tokens_api_url: Option<String>,
     pub count_tokens_api_key: Option<String>,
     pub count_tokens_auth_type: Option<String>,
+    /// 调度模式: "fixed" = 固定模式, "auto" = 自动模式
+    pub scheduling_mode: Option<String>,
 }
 
 // ============ 导入导出 ============

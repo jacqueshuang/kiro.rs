@@ -186,6 +186,7 @@ export interface SettingsResponse {
   countTokensApiUrl?: string;
   countTokensApiKey?: string;
   countTokensAuthType: string;
+  schedulingMode: string; // 调度模式: "fixed" = 固定模式, "auto" = 自动模式
 }
 
 export interface UpdateSettingsRequest {
@@ -196,6 +197,7 @@ export interface UpdateSettingsRequest {
   countTokensApiUrl?: string;
   countTokensApiKey?: string;
   countTokensAuthType?: string;
+  schedulingMode?: string;
 }
 
 export const settingsApi = {

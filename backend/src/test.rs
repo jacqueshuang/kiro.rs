@@ -41,7 +41,7 @@ pub(crate) async fn call_stream_api() -> anyhow::Result<()> {
     println!("已加载配置");
 
     // 创建 MultiTokenManager 和 KiroProvider
-    let token_manager = MultiTokenManager::new(config, vec![credentials], None)?;
+    let token_manager = MultiTokenManager::new(config, vec![credentials])?;
     let provider = KiroProvider::new(Arc::new(token_manager));
 
     println!("\n开始调用流式 API...\n");

@@ -617,6 +617,10 @@ fn convert_assistant_message(
         } else {
             format!("<thinking>{}</thinking>", thinking_content)
         }
+    } else if text_content.is_empty() && !tool_uses.is_empty() {
+        // 如果只有 tool_use 没有文本内容，添加占位符
+        // Kiro API 要求 assistant 消息必须有文本内容
+        "I'll help you with that.".to_string()
     } else {
         text_content
     };
@@ -691,9 +695,10 @@ mod tests {
 
     #[test]
     fn test_is_unsupported_tool() {
-        assert!(is_unsupported_tool("web_search"));
-        assert!(is_unsupported_tool("websearch"));
-        assert!(is_unsupported_tool("WebSearch"));
+        // 当前实现不过滤任何工具（web_search 等已支持）
+        assert!(!is_unsupported_tool("web_search"));
+        assert!(!is_unsupported_tool("websearch"));
+        assert!(!is_unsupported_tool("WebSearch"));
         assert!(!is_unsupported_tool("read_file"));
     }
 

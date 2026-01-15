@@ -26,6 +26,7 @@ export default function SettingsPage() {
     kiroVersion: '',
     systemVersion: '',
     nodeVersion: '',
+    schedulingMode: 'fixed',
   });
 
   // 加载设置
@@ -43,6 +44,7 @@ export default function SettingsPage() {
           kiroVersion: res.kiroVersion,
           systemVersion: res.systemVersion,
           nodeVersion: res.nodeVersion,
+          schedulingMode: res.schedulingMode || 'fixed',
         });
       } catch {
         navigate('/admin');
@@ -100,6 +102,20 @@ export default function SettingsPage() {
             <CardDescription>配置凭据额度相关参数</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>调度模式</Label>
+              <select
+                className="w-full h-10 px-3 rounded-md border bg-background"
+                value={form.schedulingMode}
+                onChange={(e) => setForm({ ...form, schedulingMode: e.target.value })}
+              >
+                <option value="fixed">固定模式</option>
+                <option value="auto">自动模式</option>
+              </select>
+              <p className="text-xs text-muted-foreground">
+                固定模式：一直使用当前账号，报错时自动切换；自动模式：按优先级顺序使用账号，自动跳过禁用/额度用尽的账号，支持会话粘性
+              </p>
+            </div>
             <div className="space-y-2">
               <Label>最低额度阈值</Label>
               <Input
