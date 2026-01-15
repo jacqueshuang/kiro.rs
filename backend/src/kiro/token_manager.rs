@@ -1469,8 +1469,12 @@ impl MultiTokenManager {
     }
 
     /// 设置凭据禁用状态（Admin API）
+    ///
+    /// 禁用账号时会自动处理：
+    /// - 如果是当前账号（固定模式），自动切换到下一个可用账号
+    /// - 清除该账号的所有 session 映射（自动模式）
     pub fn set_disabled(&self, id: u64, disabled: bool) -> anyhow::Result<()> {
-        {
+        let is_current = {
             let mut entries = self.entries.lock();
             let entry = entries
                 .iter_mut()
@@ -1484,7 +1488,25 @@ impl MultiTokenManager {
             } else {
                 entry.disabled_reason = Some(DisabledReason::Manual);
             }
+
+            // 检查是否是当前账号
+            let current_id = *self.current_id.lock();
+            current_id == id
+        };
+
+        // 如果禁用的是当前账号，切换到下一个可用账号
+        if disabled && is_current {
+            self.select_first_available();
+            tracing::info!("当前账号 #{} 被禁用，已自动切换", id);
         }
+
+        // 清除该账号的所有 session 映射
+        if disabled {
+            let mut session_mapping = self.session_mapping.lock();
+            session_mapping.retain(|_, &mut mapped_id| mapped_id != id);
+            tracing::debug!("已清除账号 #{} 的 session 映射", id);
+        }
+
         // 持久化更改到数据库
         if let Some(db) = &self.db {
             db.set_credential_disabled(id as i64, disabled)?;
