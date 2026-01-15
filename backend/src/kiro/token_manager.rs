@@ -681,6 +681,11 @@ impl MultiTokenManager {
         self.entries.lock().iter().filter(|e| !e.disabled).count()
     }
 
+    /// 获取当前凭据 ID（固定模式使用）
+    pub fn get_current_id(&self) -> u64 {
+        *self.current_id.lock()
+    }
+
     /// 获取当前调度模式
     pub fn get_scheduling_mode(&self) -> SchedulingMode {
         self.db

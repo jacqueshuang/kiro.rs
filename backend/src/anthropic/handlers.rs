@@ -77,13 +77,6 @@ pub async fn post_messages(
     State(state): State<AppState>,
     JsonExtractor(payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
-    tracing::info!(
-        model = %payload.model,
-        max_tokens = %payload.max_tokens,
-        stream = %payload.stream,
-        message_count = %payload.messages.len(),
-        "Received POST /v1/messages request"
-    );
     // 检查 KiroProvider 是否可用
     let provider = match &state.kiro_provider {
         Some(p) => p.clone(),
@@ -99,6 +92,14 @@ pub async fn post_messages(
                 .into_response();
         }
     };
+
+    tracing::info!(
+        model = %payload.model,
+        max_tokens = %payload.max_tokens,
+        stream = %payload.stream,
+        message_count = %payload.messages.len(),
+        "Received POST /v1/messages request"
+    );
 
     // 检查是否为 WebSearch 请求
     if websearch::has_web_search_tool(&payload) {
