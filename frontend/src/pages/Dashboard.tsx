@@ -36,7 +36,7 @@ import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { authApi, credentialsApi, importExportApi, type CredentialItem, type UserInfo, type ImportCredentialItem } from '@/api';
-import { User, Plus, DotsThreeVertical, Gear, SignOut, Envelope, ArrowsClockwise, ArrowsCounterClockwise, Sun, Moon, Export, UploadSimple, Play } from '@phosphor-icons/react';
+import { User, Plus, DotsThreeVertical, Gear, SignOut, Envelope, ArrowsClockwise, ArrowsCounterClockwise, Sun, Moon, Export, UploadSimple, Play, Trash } from '@phosphor-icons/react';
 import { useTheme } from '@/hooks/useTheme';
 
 export default function DashboardPage() {
@@ -58,12 +58,10 @@ export default function DashboardPage() {
     authMethod: 'social',
     clientId: '',
     clientSecret: '',
-    priority: 0,
     region: 'us-east-1',
     proxyUrl: '',
   });
   const [editForm, setEditForm] = useState({
-    priority: 0,
     region: 'us-east-1',
     machineId: '',
     refreshToken: '',
@@ -190,13 +188,12 @@ export default function DashboardPage() {
         authMethod: addForm.authMethod,
         clientId: addForm.clientId || undefined,
         clientSecret: addForm.clientSecret || undefined,
-        priority: addForm.priority,
         region: addForm.region,
         proxyUrl: addForm.proxyUrl || undefined,
       });
       toast.success('添加成功');
       setShowAddDialog(false);
-      setAddForm({ refreshToken: '', authMethod: 'social', clientId: '', clientSecret: '', priority: 0, region: 'us-east-1', proxyUrl: '' });
+      setAddForm({ refreshToken: '', authMethod: 'social', clientId: '', clientSecret: '', region: 'us-east-1', proxyUrl: '' });
       refreshCredentials();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '添加失败');
@@ -241,7 +238,6 @@ export default function DashboardPage() {
   const openEditDialog = (cred: CredentialItem) => {
     setEditingCredential(cred);
     setEditForm({
-      priority: cred.priority,
       region: cred.region || 'us-east-1',
       machineId: cred.machineId || '',
       refreshToken: '',
@@ -257,7 +253,6 @@ export default function DashboardPage() {
     if (!editingCredential) return;
     try {
       await credentialsApi.update(editingCredential.id, {
-        priority: editForm.priority,
         region: editForm.region,
         machineId: editForm.machineId || undefined,
         refreshToken: editForm.refreshToken || undefined,
@@ -353,6 +348,44 @@ export default function DashboardPage() {
       setSelectedIds(new Set());
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '导出失败');
+    }
+  };
+
+  // 批量删除凭据
+  const handleBatchDelete = async () => {
+    if (selectedIds.size === 0) {
+      toast.error('请先选择要删除的凭据');
+      return;
+    }
+
+    if (!confirm(`确定要删除选中的 ${selectedIds.size} 个凭据吗？此操作不可恢复。`)) {
+      return;
+    }
+
+    try {
+      const ids = Array.from(selectedIds);
+      let successCount = 0;
+      let failCount = 0;
+
+      for (const id of ids) {
+        try {
+          await credentialsApi.delete(id);
+          successCount++;
+        } catch {
+          failCount++;
+        }
+      }
+
+      if (failCount > 0) {
+        toast.warning(`删除完成: ${successCount} 成功, ${failCount} 失败`);
+      } else {
+        toast.success(`成功删除 ${successCount} 个凭据`);
+      }
+
+      setSelectedIds(new Set());
+      refreshCredentials();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '删除失败');
     }
   };
 
@@ -453,6 +486,15 @@ export default function DashboardPage() {
               >
                 <Export size={16} className="mr-1" />
                 导出 Token {selectedIds.size > 0 && `(${selectedIds.size})`}
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={handleBatchDelete}
+                disabled={selectedIds.size === 0}
+              >
+                <Trash size={16} className="mr-1" />
+                批量删除 {selectedIds.size > 0 && `(${selectedIds.size})`}
               </Button>
               <Button size="sm" onClick={() => setShowAddDialog(true)}>
                 <Plus size={16} className="mr-1" />
@@ -642,16 +684,6 @@ export default function DashboardPage() {
                 </>
               )}
               <div className="space-y-2">
-                <Label>优先级</Label>
-                <Input
-                  type="number"
-                  placeholder="0"
-                  value={addForm.priority}
-                  onChange={(e) => setAddForm({ ...addForm, priority: parseInt(e.target.value) || 0 })}
-                />
-                <p className="text-xs text-muted-foreground">数字越小优先级越高</p>
-              </div>
-              <div className="space-y-2">
                 <Label>AWS Region</Label>
                 <select
                   className="w-full h-10 px-3 rounded-md border bg-background"
@@ -773,16 +805,6 @@ export default function DashboardPage() {
                 />
               </div>
             )}
-            <div className="space-y-2">
-              <Label>优先级</Label>
-              <Input
-                type="number"
-                placeholder="0"
-                value={editForm.priority}
-                onChange={(e) => setEditForm({ ...editForm, priority: parseInt(e.target.value) || 0 })}
-              />
-              <p className="text-xs text-muted-foreground">数字越小优先级越高</p>
-            </div>
             <div className="space-y-2">
               <Label>AWS Region</Label>
               <select

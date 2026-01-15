@@ -63,7 +63,7 @@ impl std::error::Error for ConversionError {}
 ///
 /// user_id 格式: user_xxx_account__session_0b4445e1-f5be-49e1-87ce-62bbc28ad705
 /// 提取 session_ 后面的 UUID 作为 conversationId
-fn extract_session_id(user_id: &str) -> Option<String> {
+pub fn extract_session_id(user_id: &str) -> Option<String> {
     // 查找 "session_" 后面的内容
     if let Some(pos) = user_id.find("session_") {
         let session_part = &user_id[pos + 8..]; // "session_" 长度为 8

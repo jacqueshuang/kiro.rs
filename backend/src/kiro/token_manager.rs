@@ -515,6 +515,8 @@ pub struct MultiTokenManager {
     db: Option<Database>,
     /// Session 到凭据 ID 的映射（auto 模式下的粘性调度）
     session_mapping: Mutex<HashMap<String, u64>>,
+    /// 自动模式轮询计数器（用于无 session_id 时的轮询调度）
+    auto_round_robin_counter: Mutex<usize>,
 }
 
 /// 每个凭据最大 API 调用失败次数
@@ -569,11 +571,11 @@ impl MultiTokenManager {
             })
             .collect();
 
-        // 选择初始凭据：优先级最高（priority 最小）的凭据，无凭据时为 0
+        // 选择初始凭据：列表中第一个可用的凭据，无凭据时为 0
         let initial_id = entries
             .iter()
             .filter(|e| !e.disabled)
-            .min_by_key(|e| e.credentials.priority)
+            .next()
             .map(|e| e.id)
             .unwrap_or(0);
 
@@ -584,6 +586,7 @@ impl MultiTokenManager {
             refresh_lock: TokioMutex::new(()),
             db: Some(db),
             session_mapping: Mutex::new(HashMap::new()),
+            auto_round_robin_counter: Mutex::new(0),
         })
     }
 
@@ -633,11 +636,11 @@ impl MultiTokenManager {
             anyhow::bail!("检测到重复的凭据 ID: {:?}", duplicate_ids);
         }
 
-        // 选择初始凭据：优先级最高（priority 最小）的凭据，无凭据时为 0
+        // 选择初始凭据：列表中第一个可用的凭据，无凭据时为 0
         let initial_id = entries
             .iter()
             .filter(|e| !e.disabled)
-            .min_by_key(|e| e.credentials.priority)
+            .next()
             .map(|e| e.id)
             .unwrap_or(0);
 
@@ -648,6 +651,7 @@ impl MultiTokenManager {
             refresh_lock: TokioMutex::new(()),
             db: None,
             session_mapping: Mutex::new(HashMap::new()),
+            auto_round_robin_counter: Mutex::new(0),
         })
     }
 
@@ -764,7 +768,7 @@ impl MultiTokenManager {
     ///
     /// Auto 模式逻辑：
     /// 1. 优先使用 session 粘性映射的凭据（如果仍然可用）
-    /// 2. 否则按优先级顺序选择第一个可用凭据
+    /// 2. 否则使用轮询策略选择下一个可用凭据
     /// 3. 自动剔除：禁用、暂停、额度用尽等问题账号
     fn select_credential_for_auto(
         &self,
@@ -827,16 +831,29 @@ impl MultiTokenManager {
             }
         }
 
-        // 2. 按优先级顺序选择第一个可用凭据
-        // 优先级相同时，按 ID 顺序（先添加的优先）
-        let best = entries
+        // 2. 使用轮询策略选择下一个可用凭据
+        // 收集所有可用凭据
+        let available_entries: Vec<_> = entries
             .iter()
             .filter(|e| is_credential_available(e))
-            .min_by_key(|e| (e.credentials.priority, e.id));
+            .collect();
 
-        if let Some(entry) = best {
+        if !available_entries.is_empty() {
+            // 获取并递增轮询计数器
+            let mut counter = self.auto_round_robin_counter.lock();
+            let index = *counter % available_entries.len();
+            *counter = counter.wrapping_add(1);
+
+            let entry = available_entries[index];
             let id = entry.id;
             let creds = entry.credentials.clone();
+
+            tracing::debug!(
+                "自动模式轮询选择凭据 #{} (索引 {}/{})",
+                id,
+                index + 1,
+                available_entries.len()
+            );
 
             // 记录 session 映射
             if let Some(sid) = session_id {
@@ -866,11 +883,11 @@ impl MultiTokenManager {
                 }
             }
 
-            // 重新选择（按优先级顺序）
+            // 重新选择（列表中第一个可用的）
             let best = entries
                 .iter()
                 .filter(|e| !e.disabled)
-                .min_by_key(|e| e.credentials.priority);
+                .next();
 
             if let Some(entry) = best {
                 let id = entry.id;
@@ -942,6 +959,8 @@ impl MultiTokenManager {
     ///
     /// 如果 Token 过期或即将过期，会自动刷新
     /// Token 刷新失败时会尝试下一个可用凭据（不计入失败次数）
+    ///
+    /// 固定模式：一直使用当前凭据，出问题时按列表顺序切换到下一个可用凭据
     pub async fn acquire_context(&self) -> anyhow::Result<CallContext> {
         let total = self.total_count();
         let mut tried_count = 0;
@@ -963,13 +982,13 @@ impl MultiTokenManager {
                 if let Some(entry) = entries.iter().find(|e| e.id == current_id && !e.disabled) {
                     (entry.id, entry.credentials.clone())
                 } else {
-                    // 当前凭据不可用，选择优先级最高的可用凭据
+                    // 当前凭据不可用，选择列表中第一个可用凭据
                     let mut best = entries
                         .iter()
                         .filter(|e| !e.disabled)
-                        .min_by_key(|e| e.credentials.priority);
+                        .next();
 
-                    // 没有可用凭据：如果是“自动禁用导致全灭”，做一次类似重启的自愈
+                    // 没有可用凭据：如果是"自动禁用导致全灭"，做一次类似重启的自愈
                     if best.is_none()
                         && entries.iter().any(|e| {
                             e.disabled && e.disabled_reason == Some(DisabledReason::TooManyFailures)
@@ -988,7 +1007,7 @@ impl MultiTokenManager {
                         best = entries
                             .iter()
                             .filter(|e| !e.disabled)
-                            .min_by_key(|e| e.credentials.priority);
+                            .next();
                     }
 
                     if let Some(entry) = best {
@@ -1018,57 +1037,61 @@ impl MultiTokenManager {
                 Err(e) => {
                     tracing::warn!("凭据 #{} Token 刷新失败，尝试下一个凭据: {}", id, e);
 
-                    // Token 刷新失败，切换到下一个优先级的凭据（不计入失败次数）
-                    self.switch_to_next_by_priority();
+                    // Token 刷新失败，切换到列表中下一个可用凭据（不计入失败次数）
+                    self.switch_to_next_in_list();
                     tried_count += 1;
                 }
             }
         }
     }
 
-    /// 切换到下一个优先级最高的可用凭据（内部方法）
-    fn switch_to_next_by_priority(&self) {
+    /// 切换到列表中下一个可用凭据（内部方法）
+    ///
+    /// 按列表顺序，从当前凭据之后开始查找下一个可用凭据
+    /// 如果到达列表末尾，则从头开始查找
+    fn switch_to_next_in_list(&self) {
         let entries = self.entries.lock();
         let mut current_id = self.current_id.lock();
 
-        // 选择优先级最高的未禁用凭据（排除当前凭据）
-        if let Some(entry) = entries
+        // 找到当前凭据在列表中的位置
+        let current_index = entries
             .iter()
-            .filter(|e| !e.disabled && e.id != *current_id)
-            .min_by_key(|e| e.credentials.priority)
-        {
-            *current_id = entry.id;
-            tracing::info!(
-                "已切换到凭据 #{}（优先级 {}）",
-                entry.id,
-                entry.credentials.priority
-            );
+            .position(|e| e.id == *current_id)
+            .unwrap_or(0);
+
+        let len = entries.len();
+        if len == 0 {
+            return;
+        }
+
+        // 从当前位置之后开始查找下一个可用凭据
+        for i in 1..=len {
+            let next_index = (current_index + i) % len;
+            let entry = &entries[next_index];
+            if !entry.disabled {
+                *current_id = entry.id;
+                tracing::info!("已切换到凭据 #{}", entry.id);
+                return;
+            }
         }
     }
 
-    /// 选择优先级最高的未禁用凭据作为当前凭据（内部方法）
+    /// 选择列表中第一个可用凭据作为当前凭据（内部方法）
     ///
-    /// 与 `switch_to_next_by_priority` 不同，此方法不排除当前凭据，
-    /// 纯粹按优先级选择，用于优先级变更后立即生效
-    fn select_highest_priority(&self) {
+    /// 用于凭据变更后重新选择
+    fn select_first_available(&self) {
         let entries = self.entries.lock();
         let mut current_id = self.current_id.lock();
 
-        // 选择优先级最高的未禁用凭据（不排除当前凭据）
-        if let Some(best) = entries
-            .iter()
-            .filter(|e| !e.disabled)
-            .min_by_key(|e| e.credentials.priority)
-        {
-            if best.id != *current_id {
-                tracing::info!(
-                    "优先级变更后切换凭据: #{} -> #{}（优先级 {}）",
-                    *current_id,
-                    best.id,
-                    best.credentials.priority
-                );
-                *current_id = best.id;
-            }
+        // 检查当前凭据是否仍然可用
+        if entries.iter().any(|e| e.id == *current_id && !e.disabled) {
+            return; // 当前凭据仍然可用，不需要切换
+        }
+
+        // 选择列表中第一个可用凭据
+        if let Some(best) = entries.iter().filter(|e| !e.disabled).next() {
+            tracing::info!("凭据变更后切换: #{} -> #{}", *current_id, best.id);
+            *current_id = best.id;
         }
     }
 
@@ -1183,7 +1206,7 @@ impl MultiTokenManager {
 
     /// 报告指定凭据 API 调用失败
     ///
-    /// 增加失败计数，达到阈值时禁用凭据并切换到优先级最高的可用凭据
+    /// 增加失败计数，达到阈值时禁用凭据并切换到列表中下一个可用凭据
     /// 返回是否还有可用凭据可以重试
     ///
     /// # Arguments
@@ -1191,6 +1214,12 @@ impl MultiTokenManager {
     pub fn report_failure(&self, id: u64) -> bool {
         let mut entries = self.entries.lock();
         let mut current_id = self.current_id.lock();
+
+        // 找到当前凭据在列表中的位置（用于切换到下一个）
+        let current_index = entries
+            .iter()
+            .position(|e| e.id == id)
+            .unwrap_or(0);
 
         let entry = match entries.iter_mut().find(|e| e.id == id) {
             Some(e) => e,
@@ -1212,22 +1241,20 @@ impl MultiTokenManager {
             entry.disabled_reason = Some(DisabledReason::TooManyFailures);
             tracing::error!("凭据 #{} 已连续失败 {} 次，已被禁用", id, failure_count);
 
-            // 切换到优先级最高的可用凭据
-            if let Some(next) = entries
-                .iter()
-                .filter(|e| !e.disabled)
-                .min_by_key(|e| e.credentials.priority)
-            {
-                *current_id = next.id;
-                tracing::info!(
-                    "已切换到凭据 #{}（优先级 {}）",
-                    next.id,
-                    next.credentials.priority
-                );
-            } else {
-                tracing::error!("所有凭据均已禁用！");
-                return false;
+            // 切换到列表中下一个可用凭据
+            let len = entries.len();
+            for i in 1..=len {
+                let next_index = (current_index + i) % len;
+                let next_entry = &entries[next_index];
+                if !next_entry.disabled {
+                    *current_id = next_entry.id;
+                    tracing::info!("已切换到凭据 #{}", next_entry.id);
+                    return true;
+                }
             }
+
+            tracing::error!("所有凭据均已禁用！");
+            return false;
         }
 
         // 检查是否还有可用凭据
@@ -1238,11 +1265,17 @@ impl MultiTokenManager {
     ///
     /// 用于处理 402 Payment Required 且 reason 为 `MONTHLY_REQUEST_COUNT` 的场景：
     /// - 立即禁用该凭据（不等待连续失败阈值）
-    /// - 切换到下一个可用凭据继续重试
+    /// - 切换到列表中下一个可用凭据继续重试
     /// - 返回是否还有可用凭据
     pub fn report_quota_exhausted(&self, id: u64) -> bool {
         let mut entries = self.entries.lock();
         let mut current_id = self.current_id.lock();
+
+        // 找到当前凭据在列表中的位置（用于切换到下一个）
+        let current_index = entries
+            .iter()
+            .position(|e| e.id == id)
+            .unwrap_or(0);
 
         let entry = match entries.iter_mut().find(|e| e.id == id) {
             Some(e) => e,
@@ -1263,19 +1296,16 @@ impl MultiTokenManager {
             id
         );
 
-        // 切换到优先级最高的可用凭据
-        if let Some(next) = entries
-            .iter()
-            .filter(|e| !e.disabled)
-            .min_by_key(|e| e.credentials.priority)
-        {
-            *current_id = next.id;
-            tracing::info!(
-                "已切换到凭据 #{}（优先级 {}）",
-                next.id,
-                next.credentials.priority
-            );
-            return true;
+        // 切换到列表中下一个可用凭据
+        let len = entries.len();
+        for i in 1..=len {
+            let next_index = (current_index + i) % len;
+            let next_entry = &entries[next_index];
+            if !next_entry.disabled {
+                *current_id = next_entry.id;
+                tracing::info!("已切换到凭据 #{}", next_entry.id);
+                return true;
+            }
         }
 
         tracing::error!("所有凭据均已禁用！");
@@ -1286,11 +1316,17 @@ impl MultiTokenManager {
     ///
     /// 用于处理 403 且响应体包含 "suspended" 的场景：
     /// - 立即禁用该凭据（不等待连续失败阈值）
-    /// - 切换到下一个可用凭据
+    /// - 切换到列表中下一个可用凭据
     /// - 返回是否还有可用凭据
     pub fn report_account_suspended(&self, id: u64) -> bool {
         let mut entries = self.entries.lock();
         let mut current_id = self.current_id.lock();
+
+        // 找到当前凭据在列表中的位置（用于切换到下一个）
+        let current_index = entries
+            .iter()
+            .position(|e| e.id == id)
+            .unwrap_or(0);
 
         let entry = match entries.iter_mut().find(|e| e.id == id) {
             Some(e) => e,
@@ -1311,49 +1347,53 @@ impl MultiTokenManager {
             id
         );
 
-        // 切换到优先级最高的可用凭据
-        if let Some(next) = entries
-            .iter()
-            .filter(|e| !e.disabled)
-            .min_by_key(|e| e.credentials.priority)
-        {
-            *current_id = next.id;
-            tracing::info!(
-                "已切换到凭据 #{}（优先级 {}）",
-                next.id,
-                next.credentials.priority
-            );
-            return true;
+        // 切换到列表中下一个可用凭据
+        let len = entries.len();
+        for i in 1..=len {
+            let next_index = (current_index + i) % len;
+            let next_entry = &entries[next_index];
+            if !next_entry.disabled {
+                *current_id = next_entry.id;
+                tracing::info!("已切换到凭据 #{}", next_entry.id);
+                return true;
+            }
         }
 
         tracing::error!("所有凭据均已禁用！");
         false
     }
 
-    /// 切换到优先级最高的可用凭据
+    /// 切换到列表中下一个可用凭据
     ///
     /// 返回是否成功切换
     pub fn switch_to_next(&self) -> bool {
         let entries = self.entries.lock();
         let mut current_id = self.current_id.lock();
 
-        // 选择优先级最高的未禁用凭据（排除当前凭据）
-        if let Some(next) = entries
+        // 找到当前凭据在列表中的位置
+        let current_index = entries
             .iter()
-            .filter(|e| !e.disabled && e.id != *current_id)
-            .min_by_key(|e| e.credentials.priority)
-        {
-            *current_id = next.id;
-            tracing::info!(
-                "已切换到凭据 #{}（优先级 {}）",
-                next.id,
-                next.credentials.priority
-            );
-            true
-        } else {
-            // 没有其他可用凭据，检查当前凭据是否可用
-            entries.iter().any(|e| e.id == *current_id && !e.disabled)
+            .position(|e| e.id == *current_id)
+            .unwrap_or(0);
+
+        let len = entries.len();
+        if len == 0 {
+            return false;
         }
+
+        // 从当前位置之后开始查找下一个可用凭据（排除当前凭据）
+        for i in 1..len {
+            let next_index = (current_index + i) % len;
+            let entry = &entries[next_index];
+            if !entry.disabled {
+                *current_id = entry.id;
+                tracing::info!("已切换到凭据 #{}", entry.id);
+                return true;
+            }
+        }
+
+        // 没有其他可用凭据，检查当前凭据是否可用
+        entries.iter().any(|e| e.id == *current_id && !e.disabled)
     }
 
     /// 获取使用额度信息
@@ -1454,8 +1494,8 @@ impl MultiTokenManager {
 
     /// 设置凭据优先级（Admin API）
     ///
-    /// 修改优先级后会立即按新优先级重新选择当前凭据。
-    /// 即使持久化失败，内存中的优先级和当前凭据选择也会生效。
+    /// 注意：优先级字段已弃用，不再影响调度逻辑。
+    /// 保留此方法是为了向后兼容。
     pub fn set_priority(&self, id: u64, priority: u32) -> anyhow::Result<()> {
         {
             let mut entries = self.entries.lock();
@@ -1465,8 +1505,6 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
             entry.credentials.priority = priority;
         }
-        // 立即按新优先级重新选择当前凭据（无论持久化是否成功）
-        self.select_highest_priority();
         // 持久化更改到数据库
         if let Some(db) = &self.db {
             db.set_credential_priority(id as i64, priority)?;
@@ -1543,10 +1581,7 @@ impl MultiTokenManager {
             }
         }
 
-        // 如果更新了优先级，重新选择当前凭据
-        if priority.is_some() {
-            self.select_highest_priority();
-        }
+        // 注意：优先级字段已弃用，不再影响调度逻辑
 
         // 持久化更改到数据库
         if let Some(db) = &self.db {
@@ -1740,9 +1775,9 @@ impl MultiTokenManager {
             was_current
         };
 
-        // 如果删除的是当前凭据，切换到优先级最高的可用凭据
+        // 如果删除的是当前凭据，切换到列表中第一个可用凭据
         if was_current {
-            self.select_highest_priority();
+            self.select_first_available();
         }
 
         // 如果删除后没有任何凭据，将 current_id 重置为 0（与初始化行为保持一致）

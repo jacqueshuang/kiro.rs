@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::time::interval;
 use uuid::Uuid;
 
-use super::converter::{ConversionError, convert_request};
+use super::converter::{ConversionError, convert_request, extract_session_id};
 use super::middleware::AppState;
 use super::stream::{SseEvent, StreamContext};
 use super::types::{
@@ -174,6 +174,13 @@ pub async fn post_messages(
         .map(|t| t.thinking_type == "enabled")
         .unwrap_or(false);
 
+    // 提取 session_id 用于自动模式下的粘性调度
+    let session_id = payload
+        .metadata
+        .as_ref()
+        .and_then(|m| m.user_id.as_ref())
+        .and_then(|user_id| extract_session_id(user_id));
+
     if payload.stream {
         // 流式响应
         handle_stream_request(
@@ -182,11 +189,12 @@ pub async fn post_messages(
             &payload.model,
             input_tokens,
             thinking_enabled,
+            session_id,
         )
         .await
     } else {
         // 非流式响应
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens).await
+        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, session_id).await
     }
 }
 
@@ -197,9 +205,10 @@ async fn handle_stream_request(
     model: &str,
     input_tokens: i32,
     thinking_enabled: bool,
+    session_id: Option<String>,
 ) -> Response {
-    // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api_stream(request_body).await {
+    // 调用 Kiro API（支持多凭据故障转移和 session 粘性调度）
+    let response = match provider.call_api_stream_with_session(request_body, session_id).await {
         Ok(resp) => resp,
         Err(e) => {
             tracing::error!("Kiro API 调用失败: {}", e);
@@ -342,9 +351,10 @@ async fn handle_non_stream_request(
     request_body: &str,
     model: &str,
     input_tokens: i32,
+    session_id: Option<String>,
 ) -> Response {
-    // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api(request_body).await {
+    // 调用 Kiro API（支持多凭据故障转移和 session 粘性调度）
+    let response = match provider.call_api_with_session(request_body, session_id).await {
         Ok(resp) => resp,
         Err(e) => {
             tracing::error!("Kiro API 调用失败: {}", e);
