@@ -64,7 +64,7 @@ jobs:
           cache-to: type=gha,mode=max
           push: true
           # 使用转换后的全小写变量
-          tags: ghcr.io/${{ github.repository_owner }}kiro-rs-app:${{ inputs.version || github.ref_name }}-${{ matrix.arch }}
+          tags: ghcr.io/${{ github.repository_owner }}/kiro-rs-app:${{ inputs.version || github.ref_name }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=Kiro.rs Docker Image
