@@ -53,11 +53,11 @@ jobs:
           version: 9
 
       - name: Install admin-ui dependencies
-        working-directory: admin-ui
+        working-directory: frontend
         run: pnpm install
 
       - name: Build admin-ui
-        working-directory: admin-ui
+        working-directory: frontend
         run: pnpm build
 
       - name: Setup Rust
