@@ -15,7 +15,7 @@ use rust_embed::RustEmbed;
 
 /// 嵌入前端构建产物
 #[derive(RustEmbed)]
-#[folder = "../frontend/dist"]
+#[folder = "../../frontend/dist"]
 struct Asset;
 
 /// 创建 Admin UI 路由
