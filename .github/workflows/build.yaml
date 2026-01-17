@@ -72,14 +72,16 @@ jobs:
           cache-on-failure: true
 
       - name: Build app
+        working-directory: backend
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Upload build artifacts
+        
         uses: actions/upload-artifact@v4
         with:
           name: kiro-rs-${{ github.event.inputs.version || github.ref_name }}-${{ matrix.name }}
           if-no-files-found: error
           compression-level: 6
           path: |
-            target/${{ matrix.target }}/release/kiro-rs
-            target/${{ matrix.target }}/release/kiro-rs.exe
+            backend/target/${{ matrix.target }}/release/kiro-rs
+            backend/target/${{ matrix.target }}/release/kiro-rs.exe
