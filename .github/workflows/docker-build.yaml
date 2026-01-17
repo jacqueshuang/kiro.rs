@@ -29,9 +29,9 @@ jobs:
             runner: ubuntu-latest
             arch: amd64
           # 如果你的账户不支持原生 ARM runner，请将下方 runner 改为 ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-22.04-arm 
-            arch: arm64
+          # - platform: linux/arm64
+          #   runner: ubuntu-22.04-arm 
+          #   arch: arm64
 
     steps:
       - name: Checkout
@@ -52,7 +52,7 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ env.OWNER_LC }} # 使用小写用户名
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
@@ -64,7 +64,7 @@ jobs:
           cache-to: type=gha,mode=max
           push: true
           # 使用转换后的全小写变量
-          tags: ghcr.io/${{ env.OWNER_LC }}/kiro-rs:${{ inputs.version || github.ref_name }}-${{ matrix.arch }}
+          tags: ghcr.io/${{ github.repository_owner }}kiro-rs-app:${{ inputs.version || github.ref_name }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=Kiro.rs Docker Image
